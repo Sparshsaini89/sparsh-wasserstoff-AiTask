@@ -1,57 +1,61 @@
+from flask import Flask, request, jsonify
 import requests
-from bs4 import BeautifulSoup
-import html2text
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
 
+app = Flask(__name__)
 
-def get_data_from_website(url):
-    """
-    Retrieve text content and metadata from a given URL.
+# Load Sentence-BERT model
+model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
-    Args:
-        url (str): The URL to fetch content from.
+# Initialize FAISS index
+embedding_dim = 384  # Dimension of embeddings from the Sentence-BERT model
+index = faiss.IndexFlatL2(embedding_dim)
 
-    Returns:
-        tuple: A tuple containing the text content (str) and metadata (dict).
-    """
-    # Get response from the server
-    response = requests.get(url)
-    if response.status_code == 500:
-        print("Server error")
-        return
-    # Parse the HTML content using BeautifulSoup
-    soup = BeautifulSoup(response.content, 'html.parser')
+# Placeholder for content and embeddings
+content = []
+embeddings = []
 
-    # Removing js and css code
-    for script in soup(["script", "style"]):
-        script.extract()
+# Fetch content from WordPress site
+def fetch_content_from_wordpress():
+    global content, embeddings
+    response = requests.get('https://your-wordpress-site.com/wp-json/wp/v2/posts')
+    posts = response.json()
+    content = [post['content']['rendered'] for post in posts]
+    embeddings = model.encode(content)
+    index.add(np.array(embeddings))
 
-    # Extract text in markdown format
-    html = str(soup)
-    html2text_instance = html2text.HTML2Text()
-    html2text_instance.images_to_alt = True
-    html2text_instance.body_width = 0
-    html2text_instance.single_line_break = True
-    text = html2text_instance.handle(html)
+@app.route('/initialize', methods=['GET'])
+def initialize():
+    fetch_content_from_wordpress()
+    return jsonify({"status": "initialized"}), 200
 
-    # Extract page metadata
-    try:
-        page_title = soup.title.string.strip()
-    except:
-        page_title = url.path[1:].replace("/", "-")
-    meta_description = soup.find("meta", attrs={"name": "description"})
-    meta_keywords = soup.find("meta", attrs={"name": "keywords"})
-    if meta_description:
-        description = meta_description.get("content")
-    else:
-        description = page_title
-    if meta_keywords:
-        meta_keywords = meta_description.get("content")
-    else:
-        meta_keywords = ""
+@app.route('/query', methods=['POST'])
+def query():
+    user_query = request.json.get('query')
+    user_embedding = model.encode([user_query])
+    D, I = index.search(np.array(user_embedding), k=5)
+    results = [content[i] for i in I[0]]
+    return jsonify({"results": results})
 
-    metadata = {'title': page_title,
-                'url': url,
-                'description': description,
-                'keywords': meta_keywords}
+@app.route('/chain_of_thought', methods=['POST'])
+def chain_of_thought():
+    user_query = request.json.get('query')
+    user_embedding = model.encode([user_query])
+    D, I = index.search(np.array(user_embedding), k=5)
+    results = [content[i] for i in I[0]]
 
-    return text, metadata
+    chain_of_thought = generate_chain_of_thought(user_query, results)
+    return jsonify({"chain_of_thought": chain_of_thought})
+
+def generate_chain_of_thought(query, results):
+    # Implement your logic for chain of thought here
+    thought_process = ["Initial Query: " + query]
+    for result in results:
+        thought_process.append("Considering: " + result[:150] + "...")
+    thought_process.append("Final Response: " + results[0])
+    return thought_process
+
+if __name__ == '__main__':
+    app.run(debug=True)
